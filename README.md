@@ -44,7 +44,7 @@ Configuration and customization is supported through [config files](docs/configu
 Requirements
 ------------
 
-- Python 2.7.9 or later, or Python 3.6.0 or later
+- Python 3.6.0 or later (preferred), or Python 2.7.9 or later
 - macOS, Linux, or Windows 7 or newer
 - Microcontroller with an Arm Cortex-M CPU
 - Supported debug probe
@@ -54,9 +54,11 @@ Requirements
     - NXP LPC-LinkII
   - [CMSIS-DAP](http://www.keil.com/pack/doc/CMSIS/DAP/html/index.html) v2 (WinUSB),
     such as:
+    - [DAPLink](https://os.mbed.com/handbook/DAPLink) firmware version 0254 or newer.
     - Cypress KitProg3
     - Keil ULINKplus
-  - STLinkV2, either on-board or the standalone version.
+  - SEGGER J-Link (experimental)
+  - STLinkV2 or STLinkV3, either on-board or the standalone versions.
 
 
 Status
@@ -94,7 +96,7 @@ To install the latest prerelease version from the HEAD of the master branch, you
 the following:
 
 ```
-$ pip install --pre -U https://github.com/mbedmicro/pyOCD/archive/master.zip
+$ pip install --pre -U git+https://github.com/mbedmicro/pyOCD.git
 ```
 
 You can also install directly from the source by cloning the git repository and running:
@@ -225,4 +227,4 @@ License
 PyOCD is licensed with the permissive Apache 2.0 license. See the [LICENSE](LICENSE) file for the
 full text of the license.
 
-Copyright © 2006-2019 Arm Ltd
+Copyright © 2006-2019 Arm Ltd and others (see individual source files)

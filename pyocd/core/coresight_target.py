@@ -1,5 +1,5 @@
 # pyOCD debugger
-# Copyright (c) 2015-2019 Arm Limited
+# Copyright (c) 2015-2020 Arm Limited
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,21 +14,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import six
+
 from .target import Target
 from .memory_map import MemoryType
 from . import exceptions
-from ..flash.loader import FlashEraser
-from ..coresight import (dap, cortex_m, cortex_m_v8m, rom_table)
+from ..flash.eraser import FlashEraser
+from ..coresight import (dap, discovery, cortex_m, cortex_m_v8m, rom_table)
 from ..debug.svd.loader import (SVDFile, SVDLoader)
 from ..debug.context import DebugContext
 from ..debug.cache import CachingDebugContext
 from ..debug.elf.elf import ELFBinaryFile
-from ..debug.elf.flash_reader import FlashReaderContext
+from ..debug.elf.elf_reader import ElfReaderContext
 from ..utility.graph import GraphNode
 from ..utility.notification import Notification
 from ..utility.sequencer import CallSequence
 from ..target.pack.flash_algo import PackFlashAlgo
-import logging
 
 # inspect.getargspec is deprecated in Python 3.
 try:
@@ -59,10 +61,10 @@ class CoreSightTarget(Target, GraphNode):
         self.dp = dap.DebugPort(session.probe, self)
         self._selected_core = None
         self._svd_load_thread = None
-        self._root_contexts = {}
         self._new_core_num = 0
         self._elf = None
         self._irq_table = None
+        self._discoverer = None
 
     @property
     def selected_core(self):
@@ -87,8 +89,9 @@ class CoreSightTarget(Target, GraphNode):
             self._elf = None
         else:
             self._elf = ELFBinaryFile(filename, self.memory_map)
-            self.cores[0].elf = self._elf
-            self.cores[0].set_target_context(FlashReaderContext(self.cores[0].get_target_context(), self._elf))
+            for core_number in range(len(self.cores)):
+                self.cores[core_number].elf = self._elf
+                self.cores[core_number].set_target_context(ElfReaderContext(self.cores[core_number].get_target_context(), self._elf))
 
     def select_core(self, num):
         """! @note Deprecated."""
@@ -112,13 +115,10 @@ class CoreSightTarget(Target, GraphNode):
 
     def load_svd(self):
         def svd_load_completed_cb(svdDevice):
-#             LOG.debug("Completed loading SVD")
             self._svd_device = svdDevice
             self._svd_load_thread = None
 
         if not self._svd_device and self._svd_location:
-#             LOG.debug("Started loading SVD")
-
             # Spawn thread to load SVD in background.
             self._svd_load_thread = SVDLoader(self._svd_location, svd_load_completed_cb)
             self._svd_load_thread.load()
@@ -128,7 +128,6 @@ class CoreSightTarget(Target, GraphNode):
         core.set_target_context(CachingDebugContext(core))
         self.cores[core.core_number] = core
         self.add_child(core)
-        self._root_contexts[core.core_number] = None
         
         if self._selected_core is None:
             self._selected_core = core.core_number
@@ -136,19 +135,16 @@ class CoreSightTarget(Target, GraphNode):
     def create_init_sequence(self):
         seq = CallSequence(
             ('load_svd',            self.load_svd),
-            ('create_flash',        self.create_flash),
             ('pre_connect',         self.pre_connect),
-            ('dp_init',             self.dp.init),
-            ('power_up',            self.dp.power_up_debug),
-            ('find_aps',            self.dp.find_aps),
-            ('create_aps',          self.dp.create_aps),
-            ('init_ap_roms',        self.dp.init_ap_roms),
-            ('create_cores',        self.create_cores),
-            ('create_components',   self.create_components),
+            ('dp_init',             self.dp.init_sequence),
+            ('create_discoverer',   self.create_discoverer),
+            ('discovery',           lambda : self._discoverer.discover()),
             ('check_for_cores',     self.check_for_cores),
             ('halt_on_connect',     self.perform_halt_on_connect),
             ('post_connect',        self.post_connect),
-            ('notify',              lambda : self.session.notify(Target.EVENT_POST_CONNECT, self))
+            ('post_connect_hook',   self.post_connect_hook),
+            ('create_flash',        self.create_flash),
+            ('notify',              lambda : self.session.notify(Target.Event.POST_CONNECT, self))
             )
         
         return seq
@@ -163,7 +159,15 @@ class CoreSightTarget(Target, GraphNode):
         self.call_delegate('will_init_target', target=self, init_sequence=seq)
         seq.invoke()
         self.call_delegate('did_init_target', target=self)
-    
+            
+    def create_discoverer(self):
+        """! @brief Init task to create the discovery object.
+        
+        Instantiates the appropriate @ref pyocd.coresight.discovery.CoreSightDiscovery
+        CoreSightDiscovery subclass for the target's ADI version.
+        """
+        self._discoverer = discovery.ADI_DISCOVERY_CLASS_MAP[self.dp.adi_version](self)
+
     def pre_connect(self):
         """! @brief Handle some of the connect modes.
         
@@ -218,6 +222,13 @@ class CoreSightTarget(Target, GraphNode):
                     LOG.warning("Could not halt core #%d: %s", core.core_number, err,
                         exc_info=self.session.log_tracebacks)
     
+    def post_connect_hook(self):
+        """! @brief Hook function called after post_connect init task.
+        
+        This hook lets the target subclass configure the target as necessary.
+        """
+        pass
+    
     def create_flash(self):
         """! @brief Instantiates flash objects for memory regions.
         
@@ -225,28 +236,38 @@ class CoreSightTarget(Target, GraphNode):
         instance. It uses the flash_algo and flash_class properties of the region to know how
         to construct the flash object.
         """
-        for region in self.memory_map.get_regions_of_type(MemoryType.FLASH):
-            # If a path to an FLM file was set on the region, examine it first.
-            if region.flm is not None:
-                flmPath = self.session.find_user_file(None, [region.flm])
-                if flmPath is not None:
-                    LOG.info("creating flash algo from: %s", flmPath)
-                    packAlgo = PackFlashAlgo(flmPath)
-                    if self.session.options.get("debug.log_flm_info"):
-                        LOG.debug("Flash algo info: %s", packAlgo.flash_info)
-                    page_size = packAlgo.page_size
-                    if page_size <= 32:
-                        page_size = min(s[1] for s in packAlgo.sector_sizes)
-                    algo = packAlgo.get_pyocd_flash_algo(
-                            page_size,
-                            self.memory_map.get_first_region_of_type(MemoryType.RAM))
-                
-                    # If we got a valid algo from the FLM, set it on the region. This will then
-                    # be used below.
-                    if algo is not None:
-                        region.algo = algo
+        for region in self.memory_map.iter_matching_regions(type=MemoryType.FLASH):
+            # If the region doesn't have an algo dict but does have an FLM file, try to load
+            # the FLM and create the algo dict.
+            if (region.algo is None) and (region.flm is not None):
+                if isinstance(region.flm, six.string_types):
+                    flmPath = self.session.find_user_file(None, [region.flm])
+                    if flmPath is not None:
+                        LOG.info("creating flash algo from: %s", flmPath)
+                        packAlgo = PackFlashAlgo(flmPath)
+                    else:
+                        LOG.warning("Failed to find FLM file: %s", region.flm)
+                        break
+                elif isinstance(region.flm, PackFlashAlgo):
+                    packAlgo = region.flm
                 else:
-                    LOG.warning("Failed to find FLM file: %s", region.flm)
+                    LOG.warning("flash region flm attribute is unexpected type")
+                    break
+
+                # Create the algo dict from the FLM.
+                if self.session.options.get("debug.log_flm_info"):
+                    LOG.debug("Flash algo info: %s", packAlgo.flash_info)
+                page_size = packAlgo.page_size
+                if page_size <= 32:
+                    page_size = min(s[1] for s in packAlgo.sector_sizes)
+                algo = packAlgo.get_pyocd_flash_algo(
+                        page_size,
+                        self.memory_map.get_default_region_of_type(MemoryType.RAM))
+                
+                # If we got a valid algo from the FLM, set it on the region. This will then
+                # be used below.
+                if algo is not None:
+                    region.algo = algo
             
             # If the constructor of the region's flash class takes the flash_algo arg, then we
             # need the region to have a flash algo dict to pass to it. Otherwise we assume the
@@ -267,26 +288,6 @@ class CoreSightTarget(Target, GraphNode):
             
             # Store the flash object back into the memory region.
             region.flash = obj
-    
-    def _create_component(self, cmpid):
-        LOG.debug("Creating %s component", cmpid.name)
-        cmp = cmpid.factory(cmpid.ap, cmpid, cmpid.address)
-        cmp.init()
-
-    def create_cores(self):
-        self._new_core_num = 0
-        self._apply_to_all_components(self._create_component,
-            filter=lambda c: c.factory in (cortex_m.CortexM.factory, cortex_m_v8m.CortexM_v8M.factory))
-
-    def create_components(self):
-        self._apply_to_all_components(self._create_component,
-            filter=lambda c: c.factory is not None
-                and c.factory not in (cortex_m.CortexM.factory, cortex_m_v8m.CortexM_v8M.factory))
-    
-    def _apply_to_all_components(self, action, filter=None):
-        # Iterate over every top-level ROM table.
-        for ap in [x for x in self.dp.aps.values() if x.has_rom_table]:
-            ap.rom_table.for_each(action, filter)
 
     def check_for_cores(self):
         """! @brief Init task: verify that at least one core was discovered."""
@@ -298,7 +299,7 @@ class CoreSightTarget(Target, GraphNode):
                 raise exceptions.DebugError("No cores were discovered!")
 
     def disconnect(self, resume=True):
-        self.session.notify(Target.EVENT_PRE_DISCONNECT, self)
+        self.session.notify(Target.Event.PRE_DISCONNECT, self)
         self.call_delegate('will_disconnect', target=self, resume=resume)
         for core in self.cores.values():
             core.disconnect(resume)
@@ -363,7 +364,7 @@ class CoreSightTarget(Target, GraphNode):
     def find_breakpoint(self, addr):
         return self.selected_core.find_breakpoint(addr)
 
-    def set_breakpoint(self, addr, type=Target.BREAKPOINT_AUTO):
+    def set_breakpoint(self, addr, type=Target.BreakpointType.AUTO):
         return self.selected_core.set_breakpoint(addr, type)
 
     def get_breakpoint_type(self, addr):
@@ -394,6 +395,9 @@ class CoreSightTarget(Target, GraphNode):
     def get_security_state(self):
         return self.selected_core.get_security_state()
 
+    def get_halt_reason(self):
+        return self.selected_core.get_halt_reason()
+
     def set_vector_catch(self, enableMask):
         return self.selected_core.set_vector_catch(enableMask)
 
@@ -408,19 +412,6 @@ class CoreSightTarget(Target, GraphNode):
         if core is None:
             core = self._selected_core
         return self.cores[core].get_target_context()
-
-    def get_root_context(self, core=None):
-        if core is None:
-            core = self._selected_core
-        if self._root_contexts[core] is None:
-            return self.get_target_context()
-        else:
-            return self._root_contexts[core]
-
-    def set_root_context(self, context, core=None):
-        if core is None:
-            core = self._selected_core
-        self._root_contexts[core] = context
 
     @property
     def irq_table(self):

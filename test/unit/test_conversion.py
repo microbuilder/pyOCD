@@ -1,6 +1,7 @@
-# mbed CMSIS-DAP debugger
+# pyOCD debugger
 # Copyright (c) 2015 Paul Osborne <osbpau@gmail.com>
-# Copyright (c) 2018-2019 Arm Ltd
+# Copyright (c) 2018-2019 Arm Limited
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +14,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+import pytest
+import six
 
 from pyocd.utility.conversion import (
     byte_list_to_u32le_list,
@@ -31,14 +35,16 @@ from pyocd.utility.conversion import (
     hex_to_byte_list,
     hex_decode,
     hex_encode,
+    pairwise,
 )
-from pyocd.utility.mask import align_up
+from pyocd.utility.mask import (
+    align_up,
+    align_down,
+)
 from pyocd.gdbserver.gdbserver import (
     escape,
     unescape,
 )
-import pytest
-import six
 
 # pylint: disable=invalid-name
 class TestConversionUtilities(object):
@@ -141,9 +147,26 @@ class TestConversionUtilities(object):
             ((1, 1024), 1024),
             ((0, 3), 0),
             ((100, 3), 102),
+            ((8, 4), 8),
+            ((9, 4), 12),
+            ((13, 16), 16),
+            ((13, 8), 16),
         ])
     def test_align_up(self, args, result):
         assert result == align_up(*args)
+
+    @pytest.mark.parametrize(("args", "result"), [
+            ((0, 1024), 0),
+            ((1, 1024), 0),
+            ((0, 3), 0),
+            ((100, 3), 99),
+            ((8, 4), 8),
+            ((9, 4), 8),
+            ((13, 16), 0),
+            ((13, 8), 8),
+        ])
+    def test_align_down(self, args, result):
+        assert result == align_down(*args)
 
 # Characters that must be escaped.
 ESCAPEES = (0x23, 0x24, 0x2a, 0x7d) # == ('#', '$', '}', '*')
@@ -186,3 +209,13 @@ class TestGdbEscape(object):
     def test_unescape_2(self):
         assert unescape(b'1234}\x0309}\x0axyz') == \
             [0x31, 0x32, 0x33, 0x34, 0x23, 0x30, 0x39, 0x2a, 0x78, 0x79, 0x7a]
+
+class TestPairwise(object):
+    def test_empty(self):
+        assert list(pairwise([])) == []
+    
+    def test_str(self):
+        assert list(pairwise('abcdef')) == [('a','b'), ('c','d'), ('e','f')]
+    
+    def test_int(self):
+        assert list(pairwise([1, 2, 3, 4, 5, 6])) == [(1, 2), (3, 4), (5, 6)]

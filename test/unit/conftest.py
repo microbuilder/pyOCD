@@ -1,5 +1,5 @@
 # pyOCD debugger
-# Copyright (c) 2016 Arm Limited
+# Copyright (c) 2016-2020 Arm Limited
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,6 +16,13 @@
 
 import pytest
 import logging
+
+# unittest.mock is available from Python 3.3.
+try:
+    from unittest import mock
+except ImportError:
+    import mock
+
 from .mockcore import MockCore
 
 @pytest.fixture(scope='function')
@@ -25,5 +32,4 @@ def mockcore():
 # Ignore semihosting test that currently crashes on Travis
 collect_ignore = [
     "test_semihosting.py",
-    "test_pack.py"
     ]

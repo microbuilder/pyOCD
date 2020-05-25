@@ -43,6 +43,7 @@ class HidApiUSB(Interface):
         super(HidApiUSB, self).__init__()
         # Vendor page and usage_id = 2
         self.device = None
+        self.device_info = None
 
     def open(self):
         try:
@@ -60,7 +61,6 @@ class HidApiUSB(Interface):
         devices = hid.enumerate()
 
         if not devices:
-            LOG.debug("No Mbed device connected")
             return []
 
         boards = []
@@ -100,30 +100,19 @@ class HidApiUSB(Interface):
     def write(self, data):
         """! @brief Write data on the OUT endpoint associated to the HID interface
         """
-        for _ in range(self.packet_size - len(data)):
-            data.append(0)
-        #logging.debug("send: %s", data)
+        data.extend([0] * (self.packet_size - len(data)))
+#         LOG.debug("snd>(%d) %s" % (len(data), ' '.join(['%02x' % i for i in data])))
         self.device.write([0] + data)
-        return
-
 
     def read(self, timeout=-1):
         """! @brief Read data on the IN endpoint associated to the HID interface
         """
-        return self.device.read(self.packet_size)
-
-    def get_serial_number(self):
-        return self.serial_number
+        data = self.device.read(self.packet_size)
+#         LOG.debug("rcv<(%d) %s" % (len(data), ' '.join(['%02x' % i for i in data])))
+        return data
 
     def close(self):
         """! @brief Close the interface
         """
         LOG.debug("closing interface")
         self.device.close()
-
-    def set_packet_count(self, count):
-        # No interface level restrictions on count
-        self.packet_count = count
-
-    def set_packet_size(self, size):
-        self.packet_size = size

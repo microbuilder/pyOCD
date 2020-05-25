@@ -1,5 +1,5 @@
 # pyOCD debugger
-# Copyright (c) 2019 Arm Limited
+# Copyright (c) 2019-2020 Arm Limited
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,6 +25,7 @@ from .swo import SWOParser
 from ..coresight.itm import ITM
 from ..coresight.tpiu import TPIU
 from ..core.target import Target
+from ..core import exceptions
 
 LOG = logging.getLogger(__name__)
 
@@ -52,11 +53,11 @@ class SWVEventSink(TraceEventSink):
             return
         
         # Extract bytes.
-        if event.width == 8:
+        if event.width == 1:
             data = chr(event.data)
-        elif event.width == 16:
+        elif event.width == 2:
             data = chr(event.data & 0xff) + chr((event.data >> 8) & 0xff)
-        elif event.width == 32:
+        elif event.width == 4:
             data = (chr(event.data & 0xff)
                     + chr((event.data >> 8) & 0xff)
                     + chr((event.data >> 16) & 0xff)
@@ -81,7 +82,7 @@ class SWVReader(threading.Thread):
         self._shutdown_event = threading.Event()
         self._swo_clock = 0
         
-        self._session.subscribe(self._reset_handler, Target.EVENT_POST_RESET, self._session.target.cores[core_number])
+        self._session.subscribe(self._reset_handler, Target.Event.POST_RESET, self._session.target.cores[core_number])
         
     def init(self, sys_clock, swo_clock, console):
         """! @brief Configures trace graph and starts thread.

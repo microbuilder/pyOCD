@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 # pyOCD debugger
-# Copyright (c) 2018-2019 Arm Limited
+# Copyright (c) 2018-2020 Arm Limited
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -30,6 +30,7 @@ import prettytable
 from . import __version__
 from .core.session import Session
 from .core.helpers import ConnectHelper
+from .core.target import Target
 from .core import exceptions
 from .target import TARGET
 from .target.pack import pack_target
@@ -38,14 +39,15 @@ from .utility.cmdline import (
     split_command_line,
     VECTOR_CATCH_CHAR_MAP,
     convert_vector_catch,
-    convert_session_options
+    convert_session_options,
+    convert_reset_type,
     )
 from .probe.pydapaccess import DAPAccess
 from .tools.lists import ListGenerator
 from .tools.pyocd import PyOCDCommander
-from .flash import loader
+from .flash.eraser import FlashEraser
+from .flash.file_programmer import FileProgrammer
 from .core import options
-from .utility.cmdline import split_command_line
 
 try:
     import cmsis_pack_manager
@@ -64,6 +66,7 @@ DEFAULT_CMD_LOG_LEVEL = {
     'list':         logging.INFO,
     'json':         logging.FATAL + 1,
     'flash':        logging.WARNING,
+    'reset':        logging.WARNING,
     'erase':        logging.WARNING,
     'gdbserver':    logging.INFO,
     'gdb':          logging.INFO,
@@ -130,7 +133,8 @@ class PyOCDTool(object):
             help="Less logging. Can be specified multiple times.")
         
         # Define common options for all subcommands, excluding --verbose and --quiet.
-        commonOptionsNoLogging = argparse.ArgumentParser(description='common', add_help=False)
+        commonOptionsNoLoggingParser = argparse.ArgumentParser(description='common', add_help=False)
+        commonOptionsNoLogging = commonOptionsNoLoggingParser.add_argument_group("configuration")
         commonOptionsNoLogging.add_argument('-j', '--dir', metavar="PATH", dest="project_dir",
             help="Set the project directory. Defaults to the directory where pyocd was run.")
         commonOptionsNoLogging.add_argument('--config', metavar="PATH",
@@ -148,10 +152,11 @@ class PyOCDTool(object):
         
         # Define common options for all subcommands with --verbose and --quiet.
         commonOptions = argparse.ArgumentParser(description='common',
-            parents=[loggingOptions, commonOptionsNoLogging], add_help=False)
+            parents=[loggingOptions, commonOptionsNoLoggingParser], add_help=False)
         
         # Common connection related options.
-        connectOptions = argparse.ArgumentParser(description='common', add_help=False)
+        connectParser = argparse.ArgumentParser(description='common', add_help=False)
+        connectOptions = connectParser.add_argument_group("connection")
         connectOptions.add_argument("-u", "--uid", dest="unique_id",
             help="Choose a probe by its unique ID or a substring thereof.")
         connectOptions.add_argument("-b", "--board", dest="board_override", metavar="BOARD",
@@ -164,22 +169,33 @@ class PyOCDTool(object):
             help="Do not wait for a probe to be connected if none are available.")
 
         # Create *commander* subcommand parser.
-        commandOptions = argparse.ArgumentParser(description='command', add_help=False)
-        commandOptions.add_argument("-H", "--halt", action="store_true", default=None,
+        commanderParser = argparse.ArgumentParser(description='commander', add_help=False)
+        commanderOptions = commanderParser.add_argument_group("commander options")
+        commanderOptions.add_argument("-H", "--halt", action="store_true", default=None,
             help="Halt core upon connect.")
-        commandOptions.add_argument("-N", "--no-init", action="store_true",
+        commanderOptions.add_argument("-N", "--no-init", action="store_true",
             help="Do not init debug system.")
-        commandOptions.add_argument("--elf", metavar="PATH",
+        commanderOptions.add_argument("--elf", metavar="PATH",
             help="Optionally specify ELF file being debugged.")
-        commandOptions.add_argument("-c", "--command", dest="commands", metavar="CMD", action='append', nargs='+',
+        commanderOptions.add_argument("-c", "--command", dest="commands", metavar="CMD", action='append', nargs='+',
             help="Run commands.")
-        subparsers.add_parser('commander', parents=[commonOptions, connectOptions, commandOptions],
+        subparsers.add_parser('commander', parents=[commonOptions, connectParser, commanderParser],
             help="Interactive command console.")
-        subparsers.add_parser('cmd', parents=[commonOptions, connectOptions, commandOptions],
+        subparsers.add_parser('cmd', parents=[commonOptions, connectParser, commanderParser],
             help="Alias for 'commander'.")
 
         # Create *erase* subcommand parser.
-        eraseParser = subparsers.add_parser('erase', parents=[commonOptions, connectOptions],
+        eraseParser = argparse.ArgumentParser(description='erase', add_help=False)
+        eraseOptions = eraseParser.add_argument_group("erase options")
+        eraseOptions.add_argument("-c", "--chip", dest="erase_mode", action="store_const", const=FlashEraser.Mode.CHIP,
+            help="Perform a chip erase.")
+        eraseOptions.add_argument("-s", "--sector", dest="erase_mode", action="store_const", const=FlashEraser.Mode.SECTOR,
+            help="Erase the sectors listed as positional arguments.")
+        eraseOptions.add_argument("--mass", dest="erase_mode", action="store_const", const=FlashEraser.Mode.MASS,
+            help="Perform a mass erase. On some devices this is different than a chip erase.")
+        eraseOptions.add_argument("addresses", metavar="<sector-address>", action='append', nargs='*',
+            help="List of sector addresses or ranges to erase.")
+        subparsers.add_parser('erase', parents=[commonOptions, connectParser, eraseParser],
             help="Erase entire device flash or specified sectors.",
             epilog="If no position arguments are listed, then no action will be taken unless the --chip or "
             "--mass-erase options are provided. Otherwise, the positional arguments should be the addresses of flash "
@@ -190,33 +206,36 @@ class PyOCDTool(object):
             "Examples: 0x1000 (erase single sector starting at 0x1000) "
             "0x800-0x2000 (erase sectors starting at 0x800 up to but not including 0x2000) "
             "0+8192 (erase 8 kB starting at address 0)")
-        eraseParser.add_argument("-c", "--chip", dest="erase_mode", action="store_const", const=loader.FlashEraser.Mode.CHIP,
-            help="Perform a chip erase.")
-        eraseParser.add_argument("-s", "--sector", dest="erase_mode", action="store_const", const=loader.FlashEraser.Mode.SECTOR,
-            help="Erase the sectors listed as positional arguments.")
-        eraseParser.add_argument("--mass-erase", dest="erase_mode", action="store_const", const=loader.FlashEraser.Mode.MASS,
-            help="Perform a mass erase. On some devices this is different than a chip erase.")
-        eraseParser.add_argument("addresses", metavar="<sector-address>", action='append', nargs='*',
-            help="List of sector addresses or ranges to erase.")
 
         # Create *flash* subcommand parser.
-        flashParser = subparsers.add_parser('flash', parents=[commonOptions, connectOptions],
-            help="Program an image to device flash.")
-        flashParser.add_argument("-e", "--erase", choices=ERASE_OPTIONS, default='sector',
+        flashParser = argparse.ArgumentParser(description='flash', add_help=False)
+        flashOptions = flashParser.add_argument_group("flash options")
+        flashOptions.add_argument("-e", "--erase", choices=ERASE_OPTIONS, default='sector',
             help="Choose flash erase method. Default is sector.")
-        flashParser.add_argument("-a", "--base-address", metavar="ADDR", type=int_base_0,
+        flashOptions.add_argument("-a", "--base-address", metavar="ADDR", type=int_base_0,
             help="Base address used for the address where to flash a binary. Defaults to start of flash.")
-        flashParser.add_argument("--trust-crc", action="store_true",
+        flashOptions.add_argument("--trust-crc", action="store_true",
             help="Use only the CRC of each page to determine if it already has the same data.")
-        flashParser.add_argument("--format", choices=("bin", "hex", "elf"),
+        flashOptions.add_argument("--format", choices=("bin", "hex", "elf"),
             help="File format. Default is to use the file's extension.")
-        flashParser.add_argument("--skip", metavar="BYTES", default=0, type=int_base_0,
+        flashOptions.add_argument("--skip", metavar="BYTES", default=0, type=int_base_0,
             help="Skip programming the first N bytes. This can only be used with binary files.")
-        flashParser.add_argument("file", metavar="PATH",
+        flashOptions.add_argument("file", metavar="PATH",
             help="File to program into flash.")
+        subparsers.add_parser('flash', parents=[commonOptions, connectParser, flashParser],
+            help="Program an image to device flash.")
+
+        # Create *reset* subcommand parser.
+        resetParser = argparse.ArgumentParser(description='reset', add_help=False)
+        resetOptions = resetParser.add_argument_group("reset options")
+        resetOptions.add_argument("-m", "--method", default='hw', dest='reset_type', metavar="METHOD",
+            help="Reset method to use ('hw', 'sw', and others). Default is 'hw'.")
+        subparsers.add_parser('reset', parents=[commonOptions, connectParser, resetParser],
+            help="Reset a device.")
         
         # Create *gdbserver* subcommand parser.
-        gdbserverOptions = argparse.ArgumentParser(description='gdbserver', add_help=False)
+        gdbserverParser = argparse.ArgumentParser(description='gdbserver', add_help=False)
+        gdbserverOptions = gdbserverParser.add_argument_group("gdbserver options")
         gdbserverOptions.add_argument("-p", "--port", dest="port_number", type=int, default=3333,
             help="Set the port number that GDB server will open (default 3333).")
         gdbserverOptions.add_argument("-T", "--telnet-port", dest="telnet_port", type=int, default=4444,
@@ -241,63 +260,69 @@ class PyOCDTool(object):
             help="Allow single stepping to step into interrupts.")
         gdbserverOptions.add_argument("-c", "--command", dest="commands", metavar="CMD", action='append', nargs='+',
             help="Run command (OpenOCD compatibility).")
-        subparsers.add_parser('gdbserver', parents=[commonOptions, connectOptions, gdbserverOptions],
+        subparsers.add_parser('gdbserver', parents=[commonOptions, connectParser, gdbserverParser],
             help="Run the gdb remote server(s).")
-        subparsers.add_parser('gdb', parents=[commonOptions, connectOptions, gdbserverOptions],
+        subparsers.add_parser('gdb', parents=[commonOptions, connectParser, gdbserverParser],
             help="Alias for 'gdbserver'.")
 
         # Create *json* subcommand parser.
         #
         # The json subcommand does not support --verbose or --quiet since all logging is disabled.
-        jsonParser = subparsers.add_parser('json', parents=[commonOptionsNoLogging],
-            help="Output information as JSON.")
-        group = jsonParser.add_mutually_exclusive_group()
-        group.add_argument('-p', '--probes', action='store_true',
+        jsonParser = argparse.ArgumentParser(description='json', add_help=False)
+        jsonOptions = jsonParser.add_argument_group('json output')
+        jsonOptions.add_argument('-p', '--probes', action='store_true',
             help="List available probes.")
-        group.add_argument('-t', '--targets', action='store_true',
+        jsonOptions.add_argument('-t', '--targets', action='store_true',
             help="List all known targets.")
-        group.add_argument('-b', '--boards', action='store_true',
+        jsonOptions.add_argument('-b', '--boards', action='store_true',
             help="List all known boards.")
-        jsonParser.set_defaults(verbose=0, quiet=0)
+        jsonOptions.add_argument('-f', '--features', action='store_true',
+            help="List available features and options.")
+        jsonSubparser = subparsers.add_parser('json', parents=[commonOptionsNoLoggingParser, jsonParser],
+            help="Output information as JSON.")
+        jsonSubparser.set_defaults(verbose=0, quiet=0)
 
         # Create *list* subcommand parser.
-        listParser = subparsers.add_parser('list', parents=[commonOptions],
-            help="List information about probes, targets, or boards.")
-        group = listParser.add_mutually_exclusive_group()
-        group.add_argument('-p', '--probes', action='store_true',
+        listParser = argparse.ArgumentParser(description='list', add_help=False)
+        listOutput = listParser.add_argument_group("list output")
+        listOutput.add_argument('-p', '--probes', action='store_true',
             help="List available probes.")
-        group.add_argument('-t', '--targets', action='store_true',
+        listOutput.add_argument('-t', '--targets', action='store_true',
             help="List all known targets.")
-        group.add_argument('-b', '--boards', action='store_true',
+        listOutput.add_argument('-b', '--boards', action='store_true',
             help="List all known boards.")
-        listParser.add_argument('-n', '--name',
+        listOptions = listParser.add_argument_group('list options')
+        listOptions.add_argument('-n', '--name',
             help="Restrict listing to items matching the given name. Applies to targets and boards.")
-        listParser.add_argument('-r', '--vendor',
+        listOptions.add_argument('-r', '--vendor',
             help="Restrict listing to items whose vendor matches the given name. Applies to targets.")
-        listParser.add_argument('-s', '--source', choices=('builtin', 'pack'),
+        listOptions.add_argument('-s', '--source', choices=('builtin', 'pack'),
             help="Restrict listing to targets from the specified source. Applies to targets.")
-        listParser.add_argument('-H', '--no-header', action='store_true',
+        listOptions.add_argument('-H', '--no-header', action='store_true',
             help="Don't print a table header.")
+        subparsers.add_parser('list', parents=[commonOptions, listParser],
+            help="List information about probes, targets, or boards.")
 
         # Create *pack* subcommand parser.
-        packParser = subparsers.add_parser('pack', parents=[loggingOptions],
-            help="Manage CMSIS-Packs for target support.")
-        packParser.add_argument("-c", "--clean", action='store_true',
+        packParser = argparse.ArgumentParser(description='pack', add_help=False)
+        packOperations = packParser.add_argument_group('pack operations')
+        packOperations.add_argument("-c", "--clean", action='store_true',
             help="Erase all stored pack information.")
-        packParser.add_argument("-u", "--update", action='store_true',
+        packOperations.add_argument("-u", "--update", action='store_true',
             help="Update the pack index.")
-        packParser.add_argument("-s", "--show", action='store_true',
+        packOperations.add_argument("-s", "--show", action='store_true',
             help="Show the list of installed packs.")
-        packParser.add_argument("-f", "--find", dest="find_devices", metavar="GLOB", action='append',
-            help="Look up a device part number in the index using a glob pattern. The pattern is "
-                "suffixed with '*'. Can be specified multiple times.")
-        packParser.add_argument("-i", "--install", dest="install_devices", metavar="GLOB", action='append',
-            help="Download and install pack(s) to support targets matching the glob pattern. "
-                "The pattern is suffixed with '*'. Can be specified multiple times.")
-        packParser.add_argument("-n", "--no-download", action='store_true',
+        packOperations.add_argument("-f", "--find", dest="find_devices", metavar="GLOB", action='append',
+            help="Report pack(s) in the index containing matching device part numbers.")
+        packOperations.add_argument("-i", "--install", dest="install_devices", metavar="GLOB", action='append',
+            help="Download and install pack(s) containing matching device part numbers.")
+        packOptions = packParser.add_argument_group('pack options')
+        packOptions.add_argument("-n", "--no-download", action='store_true',
             help="Just list the pack(s) that would be downloaded, don't actually download anything.")
-        packParser.add_argument('-H', '--no-header', action='store_true',
+        packOptions.add_argument('-H', '--no-header', action='store_true',
             help="Don't print a table header.")
+        subparsers.add_parser('pack', parents=[loggingOptions, packParser],
+            help="Manage CMSIS-Packs for target support.")
         
         self._parser = parser
         return parser
@@ -378,9 +403,17 @@ class PyOCDTool(object):
     
     def do_list(self):
         """! @brief Handle 'list' subcommand."""
+        all_outputs = (self._args.probes, self._args.targets, self._args.boards)
+        
         # Default to listing probes.
-        if not any((self._args.probes, self._args.targets, self._args.boards)):
+        if not any(all_outputs):
             self._args.probes = True
+        
+        # Check for more than one output option being selected.
+        if sum(int(x) for x in all_outputs) > 1:
+            LOG.error("Only one of the output options '--probes', '--targets', or '--boards' "
+                      "may be selected at a time.")
+            return
         
         # Create a session with no device so we load any config.
         session = Session(None,
@@ -425,9 +458,25 @@ class PyOCDTool(object):
     
     def do_json(self):
         """! @brief Handle 'json' subcommand."""
+        all_outputs = (self._args.probes, self._args.targets, self._args.boards, self._args.features)
+        
         # Default to listing probes.
-        if not any((self._args.probes, self._args.targets, self._args.boards)):
+        if not any(all_outputs):
             self._args.probes = True
+        
+        # Check for more than one output option being selected.
+        if sum(int(x) for x in all_outputs) > 1:
+            # Because we're outputting JSON we can't just log the error, but must report the error
+            # via the JSON format.
+            obj = {
+                'pyocd_version' : __version__,
+                'version' : { 'major' : 1, 'minor' : 0 },
+                'status' : 1,
+                'error' : "More than one output data selected.",
+                }
+
+            print(json.dumps(obj, indent=4))
+            return
         
         # Create a session with no device so we load any config.
         session = Session(None,
@@ -449,6 +498,8 @@ class PyOCDTool(object):
             obj = ListGenerator.list_targets()
         elif self._args.boards:
             obj = ListGenerator.list_boards()
+        elif self._args.features:
+            obj = ListGenerator.list_features()
         else:
             assert False
         print(json.dumps(obj, indent=4))
@@ -466,22 +517,31 @@ class PyOCDTool(object):
                             unique_id=self._args.unique_id,
                             target_override=self._args.target_override,
                             frequency=self._args.frequency,
-                            blocking=False,
+                            blocking=(not self._args.no_wait),
                             options=convert_session_options(self._args.options))
         if session is None:
+            LOG.error("No device available to flash")
             sys.exit(1)
         with session:
-            programmer = loader.FileProgrammer(session,
-                                                chip_erase=self._args.erase,
-                                                trust_crc=self._args.trust_crc)
+            programmer = FileProgrammer(session,
+                            chip_erase=self._args.erase,
+                            trust_crc=self._args.trust_crc)
             programmer.program(self._args.file,
-                                base_address=self._args.base_address,
-                                skip=self._args.skip,
-                                file_format=self._args.format)
+                            base_address=self._args.base_address,
+                            skip=self._args.skip,
+                            file_format=self._args.format)
     
     def do_erase(self):
         """! @brief Handle 'erase' subcommand."""
-        self._increase_logging(["pyocd.flash.loader"])
+        self._increase_logging(["pyocd.flash.eraser"])
+        
+        # Display a nice, helpful error describing why nothing was done and how to correct it.
+        if (self._args.erase_mode is None) or not self._args.addresses:
+            LOG.error("No erase operation specified. Please specify one of '--chip', '--sector', "
+                        "or '--mass' to indicate the desired erase mode. For sector erases, a list "
+                        "of sector addresses to erase must be provided. "
+                        "See 'pyocd erase --help' for more.")
+            return
         
         session = ConnectHelper.session_with_chosen_probe(
                             project_dir=self._args.project_dir,
@@ -492,16 +552,59 @@ class PyOCDTool(object):
                             unique_id=self._args.unique_id,
                             target_override=self._args.target_override,
                             frequency=self._args.frequency,
-                            blocking=False,
+                            blocking=(not self._args.no_wait),
                             options=convert_session_options(self._args.options))
         if session is None:
+            LOG.error("No device available to erase")
             sys.exit(1)
         with session:
-            mode = self._args.erase_mode or loader.FlashEraser.Mode.SECTOR
-            eraser = loader.FlashEraser(session, mode)
+            mode = self._args.erase_mode or FlashEraser.Mode.SECTOR
+            eraser = FlashEraser(session, mode)
             
             addresses = flatten_args(self._args.addresses)
             eraser.erase(addresses)
+    
+    def do_reset(self):
+        """! @brief Handle 'reset' subcommand."""
+        self._increase_logging(["pyocd.flash.loader"])
+        
+        # Verify selected reset type.
+        try:
+            the_reset_type = convert_reset_type(self._args.reset_type)
+        except ValueError:
+            LOG.error("Invalid reset method: %s", self._args.reset_type)
+            return
+        
+        session = ConnectHelper.session_with_chosen_probe(
+                            project_dir=self._args.project_dir,
+                            config_file=self._args.config,
+                            user_script=self._args.script,
+                            no_config=self._args.no_config,
+                            pack=self._args.pack,
+                            unique_id=self._args.unique_id,
+                            target_override=self._args.target_override,
+                            frequency=self._args.frequency,
+                            blocking=(not self._args.no_wait),
+                            options=convert_session_options(self._args.options))
+        if session is None:
+            LOG.error("No device available to reset")
+            sys.exit(1)
+        try:
+            # Handle hw reset specially using the probe, so we don't need a valid connection
+            # and can skip discovery.
+            is_hw_reset = the_reset_type == Target.ResetType.HW
+            
+            # Only init the board if performing a sw reset.
+            session.open(init_board=(not is_hw_reset))
+            
+            LOG.info("Performing '%s' reset...", self._args.reset_type)
+            if is_hw_reset:
+                session.probe.reset()
+            else:
+                session.target.reset(reset_type=the_reset_type)
+            LOG.info("Done.")
+        finally:
+            session.close()
 
     def _process_commands(self, commands):
         """! @brief Handle OpenOCD commands for compatibility."""
@@ -616,7 +719,7 @@ class PyOCDTool(object):
             cache.cache_descriptors()
         
         if self._args.show:
-            packs = pack_target.ManagedPacks.get_installed_packs()
+            packs = pack_target.ManagedPacks.get_installed_packs(cache)
             pt = self._get_pretty_table(["Vendor", "Pack", "Version"])
             for ref in packs:
                 pt.add_row([
@@ -637,8 +740,8 @@ class PyOCDTool(object):
             matches = set()
             for pattern in patterns:
                 # Using fnmatch.fnmatch() was failing to match correctly.
-                pat = re.compile(fnmatch.translate(pattern + "*"), re.IGNORECASE)
-                results = {name for name in cache.index.keys() if pat.match(name)}
+                pat = re.compile(fnmatch.translate(pattern).rsplit('\\Z')[0], re.IGNORECASE)
+                results = {name for name in cache.index.keys() if pat.search(name)}
                 matches.update(results)
             
             if not matches:
@@ -646,7 +749,11 @@ class PyOCDTool(object):
                 return
             
             if self._args.find_devices:
-                pt = self._get_pretty_table(["Part", "Vendor", "Pack", "Version"])
+                # Get the list of installed pack targets.
+                installed_targets = pack_target.ManagedPacks.get_installed_targets(cache=cache)
+                installed_target_names = [target.part_number.lower() for target in installed_targets]
+                
+                pt = self._get_pretty_table(["Part", "Vendor", "Pack", "Version", "Installed"])
                 for name in sorted(matches):
                     info = cache.index[name]
                     ref, = cache.packs_for_devices([info])
@@ -655,6 +762,7 @@ class PyOCDTool(object):
                                 ref.vendor,
                                 ref.pack,
                                 ref.version,
+                                info['name'].lower() in installed_target_names,
                                 ])
                 print(pt)
             elif self._args.install_devices:
@@ -675,6 +783,7 @@ class PyOCDTool(object):
         'json':         do_json,
         'flash':        do_flash,
         'erase':        do_erase,
+        'reset':        do_reset,
         'gdbserver':    do_gdbserver,
         'gdb':          do_gdbserver,
         'commander':    do_commander,

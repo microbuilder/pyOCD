@@ -14,6 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import operator
+from functools import reduce
+
 def bitmask(*args):
     """! @brief Returns a mask with specified bit ranges set.
     
@@ -41,20 +44,27 @@ def bitmask(*args):
     mask = 0
 
     for a in args:
-        if type(a) is tuple:
-            for b in range(a[1], a[0]+1):
-                mask |= 1 << b
-        elif type(a) is list:
-            for b in a:
-                mask |= 1 << b
-        elif type(a) is int:
+        if isinstance(a, tuple):
+            hi, lo = a
+            mask |= ((1 << (hi - lo + 1)) - 1) << lo
+        elif isinstance(a, (list, set)):
+            mask |= reduce(operator.or_, ((1 << b) for b in a))
+        elif isinstance(a, int):
             mask |= 1 << a
 
     return mask
 
-def invert32(value):
-    """! @brief Return the 32-bit inverted value of the argument."""
-    return 0xffffffff & ~value
+def bit_invert(value, width=32):
+    """! @brief Return the bitwise inverted value of the argument given a specified width.
+    
+    @param value Integer value to be inverted.
+    @param width Bit width of both the input and output. If not supplied, this defaults to 32.
+    @return Integer of the bitwise inversion of @a value.
+    """
+    return ((1 << width) - 1) & (~value)
+
+invert32 = bit_invert
+"""! @brief Return the 32-bit inverted value of the argument."""
 
 def bfx(value, msb, lsb):
     """! @brief Extract a value from a bitfield."""
@@ -89,6 +99,10 @@ def same(d1, d2):
         if d1[i] != d2[i]:
             return False
     return True
+
+def align_down(value, multiple):
+    """! @brief Return value aligned down to multiple."""
+    return value // multiple * multiple
 
 def align_up(value, multiple):
     """! @brief Return value aligned up to multiple."""

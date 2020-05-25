@@ -15,7 +15,8 @@
 # limitations under the License.
 
 from .interface import Interface
-from .common import (USB_CLASS_VENDOR_SPECIFIC, filter_device_by_class, is_known_cmsis_dap_vid_pid)
+from .common import (USB_CLASS_VENDOR_SPECIFIC, filter_device_by_class, is_known_cmsis_dap_vid_pid,
+                        check_ep)
 from ..dap_access_api import DAPAccessIntf
 from ... import common
 import logging
@@ -80,7 +81,7 @@ class PyUSBv2(Interface):
         config = dev.get_active_configuration()
 
         # Get CMSIS-DAPv2 interface
-        interface = usb.util.find_descriptor(config, custom_match=_match_cmsis_dap_interface)
+        interface = usb.util.find_descriptor(config, custom_match=_match_cmsis_dap_v2_interface)
         if interface is None:
             raise DAPAccessIntf.DeviceError("Device %s has no CMSIS-DAPv2 interface" %
                                             self.serial_number)
@@ -148,7 +149,7 @@ class PyUSBv2(Interface):
             while not self.rx_stop_event.is_set():
                 self.read_sem.acquire()
                 if not self.rx_stop_event.is_set():
-                    self.rcv_data.append(self.ep_in.read(self.ep_in.wMaxPacketSize, 10 * 1000))
+                    self.rcv_data.append(self.ep_in.read(self.packet_size, 10 * 1000))
         finally:
             # Set last element of rcv_data to None on exit
             self.rcv_data.append(None)
@@ -190,12 +191,9 @@ class PyUSBv2(Interface):
     def write(self, data):
         """! @brief Write data on the OUT endpoint."""
 
-        report_size = self.packet_size
         if self.ep_out:
-            report_size = self.ep_out.wMaxPacketSize
-
-        for _ in range(report_size - len(data)):
-            data.append(0)
+            if (len(data) > 0) and (len(data) < self.packet_size) and (len(data) % self.ep_out.wMaxPacketSize == 0):
+                data.append(0)
 
         self.read_sem.release()
 
@@ -221,16 +219,6 @@ class PyUSBv2(Interface):
         
         return data
 
-    def set_packet_count(self, count):
-        # No interface level restrictions on count
-        self.packet_count = count
-
-    def set_packet_size(self, size):
-        self.packet_size = size
-
-    def get_serial_number(self):
-        return self.serial_number
-
     def close(self):
         """! @brief Close the USB interface."""
         assert self.closed is False
@@ -253,13 +241,7 @@ class PyUSBv2(Interface):
         self.intf_number = None
         self.thread = None
 
-def _check_ep(interface, ep_index, ep_dir, ep_type):
-    """! @brief Tests an endpoint type and direction."""
-    ep = interface[ep_index]
-    return (usb.util.endpoint_direction(ep.bEndpointAddress) == ep_dir) \
-        and (usb.util.endpoint_type(ep.bmAttributes) == ep_type)
-
-def _match_cmsis_dap_interface(interface):
+def _match_cmsis_dap_v2_interface(interface):
     """! @brief Returns true for a CMSIS-DAP v2 interface.
     
     This match function performs several tests on the provided USB interface descriptor, to
@@ -289,16 +271,16 @@ def _match_cmsis_dap_interface(interface):
             return False
         
         # Endpoint 0 must be bulk out.
-        if not _check_ep(interface, 0, usb.util.ENDPOINT_OUT, usb.util.ENDPOINT_TYPE_BULK):
+        if not check_ep(interface, 0, usb.util.ENDPOINT_OUT, usb.util.ENDPOINT_TYPE_BULK):
             return False
         
         # Endpoint 1 must be bulk in.
-        if not _check_ep(interface, 1, usb.util.ENDPOINT_IN, usb.util.ENDPOINT_TYPE_BULK):
+        if not check_ep(interface, 1, usb.util.ENDPOINT_IN, usb.util.ENDPOINT_TYPE_BULK):
             return False
         
         # Endpoint 2 is optional. If present it must be bulk in.
         if (interface.bNumEndpoints == 3) \
-            and not _check_ep(interface, 2, usb.util.ENDPOINT_IN, usb.util.ENDPOINT_TYPE_BULK):
+            and not check_ep(interface, 2, usb.util.ENDPOINT_IN, usb.util.ENDPOINT_TYPE_BULK):
             return False
         
         # All checks passed, this is a CMSIS-DAPv2 interface!
@@ -327,7 +309,7 @@ class HasCmsisDapv2Interface(object):
         
         try:
             config = dev.get_active_configuration()
-            cmsis_dap_interface = usb.util.find_descriptor(config, custom_match=_match_cmsis_dap_interface)
+            cmsis_dap_interface = usb.util.find_descriptor(config, custom_match=_match_cmsis_dap_v2_interface)
         except usb.core.USBError as error:
             # Produce a more helpful error message if we get a permissions error on Linux.
             if error.errno == errno.EACCES and platform.system() == "Linux" \

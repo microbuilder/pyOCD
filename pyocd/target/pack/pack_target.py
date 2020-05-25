@@ -47,7 +47,8 @@ class ManagedPacks(object):
         """! @brief Return a list containing CmsisPackRef objects for all installed packs."""
         if not CPM_AVAILABLE:
             return []
-        cache = cache or cmsis_pack_manager.Cache(True, True)
+        if cache is None:
+            cache = cmsis_pack_manager.Cache(True, True)
         results = []
         # packs_for_devices() returns only unique packs.
         for pack in cache.packs_for_devices(cache.index.values()):
@@ -60,11 +61,12 @@ class ManagedPacks(object):
         return results
 
     @staticmethod
-    def get_installed_targets():
+    def get_installed_targets(cache=None):
         """! @brief Return a list of CmsisPackDevice objects for installed pack targets."""
         if not CPM_AVAILABLE:
             return []
-        cache = cmsis_pack_manager.Cache(True, True)
+        if cache is None:
+            cache = cmsis_pack_manager.Cache(True, True)
         results = []
         for pack in ManagedPacks.get_installed_packs(cache=cache):
             pack_path = os.path.join(cache.data_path, pack.get_pack_name())
@@ -104,8 +106,11 @@ class _PackTargetMethods(object):
     def _pack_target_create_init_sequence(self):
         """! @brief Creates an init task to set the default reset type."""
         seq = super(self.__class__, self).create_init_sequence()
-        seq.insert_after('create_cores',
-            ('set_default_reset_type', self.set_default_reset_type))
+        seq.wrap_task('discovery',
+            lambda seq: seq.insert_after('create_cores',
+                            ('set_default_reset_type', self.set_default_reset_type)
+                            )
+            )
         return seq
 
     @staticmethod
@@ -125,13 +130,12 @@ class PackTargets(object):
             if dev.vendor != familyInfo.vendor:
                 continue
 
-            # Scan each level of families
-            for familyName in dev.families:
-                for regex in familyInfo.matches:
-                    # Require the regex to match the entire family name.
-                    match = regex.match(familyName)
-                    if match and match.span() == (0, len(familyName)):
-                        return familyInfo.klass
+            # Scan each level of family plus part number, from specific to generic.
+            for compare_name in reversed(dev.families + [dev.part_number]):
+                # Require the regex to match the entire family name.
+                match = familyInfo.matches.match(compare_name)
+                if match and match.span() == (0, len(compare_name)):
+                    return familyInfo.klass
         else:
             # Default target superclass.
             return CoreSightTarget

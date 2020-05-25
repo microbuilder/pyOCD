@@ -16,6 +16,8 @@
 
 from ...core.coresight_target import CoreSightTarget
 from ..family import target_kinetis
+from . import target_MIMXRT1011xxxxx
+from . import target_MIMXRT1015xxxxx
 from . import target_MIMXRT1021xxxxx
 from . import target_MIMXRT1052xxxxB
 from . import target_MKE15Z256xxx7
@@ -44,6 +46,7 @@ from . import target_MK66FN2M0xxx18
 from . import target_MK82FN256xxx15
 from . import target_MK20DX128xxx5
 from . import target_K32W042S1M2xxx
+from . import target_K32L2B
 from . import target_lpc800
 from . import target_LPC11U24FBD64_401
 from . import target_LPC1768
@@ -74,17 +77,23 @@ from . import target_lpc4088dm
 from . import target_RTL8195AM
 from . import target_CC3220SF
 from . import target_CC3220SF
-from . import target_CY8C6xxA
-from . import target_CY8C6xx7
-from . import target_CY8C6xx5
-from . import target_CY8C64xx
-from . import target_CY8C64xA
+from .cypress import target_CY8C6xxA
+from .cypress import target_CY8C6xx7
+from .cypress import target_CY8C6xx5
+from .cypress import target_CY8C64xx
+from .cypress import target_CY8C64xA
+from .cypress import target_CY8C64x5
 from . import target_musca_a1
 from . import target_musca_b1
 from . import target_LPC55S69JBD100
 from . import target_M252KG6AE
+from . import target_M263KIAAE
 from . import target_HC32F46x
 from . import target_HC32x120
+from . import target_HC32L110
+from . import target_HC32L13x
+from . import target_HC32L19x
+from . import target_HC32L07x
 
 ## @brief Dictionary of all builtin targets.
 BUILTIN_TARGETS = {
@@ -116,6 +125,7 @@ BUILTIN_TARGETS = {
           'k66f18': target_MK66FN2M0xxx18.K66F18,
           'k82f25615': target_MK82FN256xxx15.K82F25615,
           'k32w042s': target_K32W042S1M2xxx.K32W042S,
+          'k32l2b3': target_K32L2B.K32L2B3,
           'lpc800': target_lpc800.LPC800,
           'lpc11u24': target_LPC11U24FBD64_401.LPC11U24,
           'lpc1768': target_LPC1768.LPC1768,
@@ -124,12 +134,14 @@ BUILTIN_TARGETS = {
           'max32620': target_MAX32620.MAX32620,
           'max32625': target_MAX32625.MAX32625,
           'max32630': target_MAX32630.MAX32630,
+          'mimxrt1010': target_MIMXRT1011xxxxx.MIMXRT1011xxxxx,
+          'mimxrt1015': target_MIMXRT1015xxxxx.MIMXRT1015xxxxx,
           'mimxrt1020': target_MIMXRT1021xxxxx.MIMXRT1021xxxxx,
           'mimxrt1050_quadspi': target_MIMXRT1052xxxxB.MIMXRT1052xxxxB_quadspi,
           'mimxrt1050_hyperflash': target_MIMXRT1052xxxxB.MIMXRT1052xxxxB_hyperflash,
           'mimxrt1050': target_MIMXRT1052xxxxB.MIMXRT1052xxxxB_hyperflash, # Alias for default external flash.
           'nrf51': target_nRF51822_xxAA.NRF51,
-          'nrf52' : target_nRF52832_xxAA.NRF52,
+          'nrf52': target_nRF52832_xxAA.NRF52832,
           'nrf52840' : target_nRF52840_xxAA.NRF52840,
           'stm32f103rc': target_STM32F103RC.STM32F103RC,
           'stm32f051': target_STM32F051T8.STM32F051,
@@ -156,21 +168,39 @@ BUILTIN_TARGETS = {
           'cc3220sf': target_CC3220SF.CC3220SF,
           'cy8c6xxa': target_CY8C6xxA.CY8C6xxA,
           'cy8c6xx7': target_CY8C6xx7.CY8C6xx7,
+          'cy8c6xx7_nosmif': target_CY8C6xx7.CY8C6xx7_nosmif,
           'cy8c6xx5': target_CY8C6xx5.CY8C6xx5,
           'cy8c64xx_cm0': target_CY8C64xx.cy8c64xx_cm0,
           'cy8c64xx_cm4': target_CY8C64xx.cy8c64xx_cm4,
+          'cy8c64xx_cm0_nosmif': target_CY8C64xx.cy8c64xx_cm0_nosmif,
+          'cy8c64xx_cm4_nosmif': target_CY8C64xx.cy8c64xx_cm4_nosmif,
           'cy8c64xa_cm0': target_CY8C64xA.cy8c64xA_cm0,
           'cy8c64xa_cm4': target_CY8C64xA.cy8c64xA_cm4,
+          'cy8c64x5_cm0': target_CY8C64x5.cy8c64x5_cm0,
+          'cy8c64x5_cm4': target_CY8C64x5.cy8c64x5_cm4,
           'musca_a1' : target_musca_a1.MuscaA1,
           'musca_b1' : target_musca_b1.MuscaB1,
           'lpc55s69' : target_LPC55S69JBD100.LPC55S69JBD100,
-          'cy8c64xx_cm4_full' : target_CY8C64xx.cy8c64xx_cm4_full,
           'cy8c64xx_cm4_full_flash' : target_CY8C64xx.cy8c64xx_cm4_full_flash,
-          'cy8c64xa_cm4_full' : target_CY8C64xA.cy8c64xA_cm4_full,
           'cy8c64xa_cm4_full_flash' : target_CY8C64xA.cy8c64xA_cm4_full_flash,
+          'cy8c64x5_cm4_full_flash' : target_CY8C64x5.cy8c64x5_cm4_full_flash,
           'm252kg6ae' : target_M252KG6AE.M252KG6AE,
+          'm263kiaae' : target_M263KIAAE.M263KIAAE,
           'hc32f46x' : target_HC32F46x.HC32F46x,
           'hc32f120x6' : target_HC32x120.HC32F120x6TA,
           'hc32f120x8' : target_HC32x120.HC32F120x8TA,
           'hc32m120' : target_HC32x120.HC32M120,
+          'hc32l110' : target_HC32L110.HC32L110,
+          'hc32f003' : target_HC32L110.HC32F003,
+          'hc32f005' : target_HC32L110.HC32F005,
+          'hc32l136' : target_HC32L13x.HC32L136,
+          'hc32l130' : target_HC32L13x.HC32L130,
+          'hc32f030' : target_HC32L13x.HC32F030,
+          'hc32l196' : target_HC32L19x.HC32L196,
+          'hc32l190' : target_HC32L19x.HC32L190,
+          'hc32f196' : target_HC32L19x.HC32F196,
+          'hc32f190' : target_HC32L19x.HC32F190,
+          'hc32l072' : target_HC32L07x.HC32L072,
+          'hc32l073' : target_HC32L07x.HC32L073,
+          'hc32f072' : target_HC32L07x.HC32F072,
          }

@@ -1,5 +1,5 @@
 # pyOCD debugger
-# Copyright (c) 2018-2019 Arm Limited
+# Copyright (c) 2018-2020 Arm Limited
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,6 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import six
+from time import sleep
+
 from .debug_probe import DebugProbe
 from ..core.memory_interface import MemoryInterface
 from ..core import exceptions
@@ -24,7 +27,6 @@ from .stlink.detect.factory import create_mbed_detector
 from ..board.mbed_board import MbedBoard
 from ..board.board_ids import BOARD_ID_TO_INFO
 from ..utility import conversion
-import six
 
 class StlinkProbe(DebugProbe):
     """! @brief Wraps an STLink as a DebugProbe."""
@@ -42,6 +44,7 @@ class StlinkProbe(DebugProbe):
             return None
 
     def __init__(self, device):
+        super(StlinkProbe, self).__init__()
         self._link = STLink(device)
         self._is_open = False
         self._is_connected = False
@@ -96,10 +99,15 @@ class StlinkProbe(DebugProbe):
     @property
     def is_open(self):
         return self._is_open
+    
+    @property
+    def supports_swj_sequence(self):
+        return False
 
-    def create_associated_board(self, session):
+    def create_associated_board(self):
+        assert self.session is not None
         if self._board_id is not None:
-            return MbedBoard(session, board_id=self._board_id)
+            return MbedBoard(self.session, board_id=self._board_id)
         else:
             return None
     
@@ -118,10 +126,6 @@ class StlinkProbe(DebugProbe):
         self._link.enter_debug(STLink.Protocol.SWD)
         self._is_connected = True
 
-    # TODO remove
-    def swj_sequence(self):
-        pass
-
     def disconnect(self):
         # TODO Close the APs. When this is attempted, we get an undocumented 0x1d error. Doesn't
         #      seem to be necessary, anyway.
@@ -134,7 +138,10 @@ class StlinkProbe(DebugProbe):
         self._link.set_swd_frequency(frequency)
 
     def reset(self):
-        self._link.target_reset()
+        self._link.drive_nreset(True)
+        sleep(self.session.options.get('reset.hold_time'))
+        self._link.drive_nreset(False)
+        sleep(self.session.options.get('reset.post_delay'))
 
     def assert_reset(self, asserted):
         self._link.drive_nreset(asserted)
@@ -178,7 +185,7 @@ class StlinkProbe(DebugProbe):
         results = [self.read_ap(addr, now=True) for n in range(count)]
         
         def read_ap_multiple_result_callback():
-            return result
+            return results
         
         return results if now else read_ap_multiple_result_callback
 

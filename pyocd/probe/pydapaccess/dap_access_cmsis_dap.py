@@ -312,6 +312,36 @@ class _Command(object):
                     write_pos += 1
         return buf
 
+    def _check_response(self, response):
+        """! @brief Check the response status byte from CMSIS-DAP transfer commands.
+
+        The ACK bits [2:0] and the protocol error bit are checked. If any error is indicated,
+        the appropriate exception is raised. An exception is also raised for unrecognised ACK
+        values.
+        
+        @param self
+        @param response The "Transfer Response" byte from a DAP_Transfer or DAP_TransferBlock
+            command.
+        
+        @exception DAPAccessIntf.TransferFaultError Raised for the ACK_FAULT response.
+        @exception DAPAccessIntf.TransferTimeoutError Raised for ACK_WAIT response.
+        @exception DAPAccessIntf.TransferError Raised for other, less common errors, including No
+            ACK, SWD protocol error, and an unknown ACK value. A descriptive error message is used
+            to indicate which of these errors was the cause.
+        """
+        ack = response & DAPTransferResponse.ACK_MASK
+        if ack != DAPTransferResponse.ACK_OK:
+            if ack == DAPTransferResponse.ACK_FAULT:
+                raise DAPAccessIntf.TransferFaultError()
+            elif ack == DAPTransferResponse.ACK_WAIT:
+                raise DAPAccessIntf.TransferTimeoutError()
+            elif ack == DAPTransferResponse.ACK_NO_ACK:
+                raise DAPAccessIntf.TransferError("No ACK received")
+            else:
+                raise DAPAccessIntf.TransferError("Unexpected ACK value (%d) returned by probe" % ack)
+        elif (response & DAPTransferResponse.PROTOCOL_ERROR_MASK) != 0:
+            raise DAPAccessIntf.TransferError("SWD protocol error")
+    
     def _decode_transfer_data(self, data):
         """! @brief Take a byte array and extract the data from it
 
@@ -322,17 +352,8 @@ class _Command(object):
         if data[0] != Command.DAP_TRANSFER:
             raise ValueError('DAP_TRANSFER response error')
 
-        ack = data[2] & DAPTransferResponse.ACK_MASK
-        if ack != DAPTransferResponse.ACK_OK:
-            if ack == DAPTransferResponse.ACK_FAULT:
-                raise DAPAccessIntf.TransferFaultError()
-            elif ack == DAPTransferResponse.ACK_WAIT:
-                raise DAPAccessIntf.TransferTimeoutError()
-            elif ack == DAPTransferResponse.ACK_NO_ACK:
-                raise DAPAccessIntf.TransferError("No ACK received")
-            raise DAPAccessIntf.TransferError()
-        elif (data[2] & DAPTransferResponse.PROTOCOL_ERROR_MASK) != 0:
-            raise DAPAccessIntf.TransferError("SWD protocol error")
+        # Check response and raise an exception on errors.
+        self._check_response(data[2])
 
         # Check for count mismatch after checking for DAP_TRANSFER_FAULT
         # This allows TransferFaultError or TransferTimeoutError to get
@@ -391,17 +412,8 @@ class _Command(object):
         if data[0] != Command.DAP_TRANSFER_BLOCK:
             raise ValueError('DAP_TRANSFER_BLOCK response error')
 
-        ack = data[3] & DAPTransferResponse.ACK_MASK
-        if ack != DAPTransferResponse.ACK_OK:
-            if ack == DAPTransferResponse.ACK_FAULT:
-                raise DAPAccessIntf.TransferFaultError()
-            elif ack == DAPTransferResponse.ACK_WAIT:
-                raise DAPAccessIntf.TransferTimeoutError()
-            elif ack == DAPTransferResponse.ACK_NO_ACK:
-                raise DAPAccessIntf.TransferError("No ACK received")
-            raise DAPAccessIntf.TransferError()
-        elif (data[3] & DAPTransferResponse.PROTOCOL_ERROR_MASK) != 0:
-            raise DAPAccessIntf.TransferError("SWD protocol error")
+        # Check response and raise an exception on errors.
+        self._check_response(data[3])
 
         # Check for count mismatch after checking for DAP_TRANSFER_FAULT
         # This allows TransferFaultError or TransferTimeoutError to get
@@ -593,13 +605,6 @@ class DAPAccessCMSISDAP(DAPAccessIntf):
     def get_unique_id(self):
         return self._unique_id
 
-    def reset(self):
-        self.flush()
-        self._protocol.set_swj_pins(0, Pin.nRESET)
-        time.sleep(0.1)
-        self._protocol.set_swj_pins(Pin.nRESET, Pin.nRESET)
-        time.sleep(0.1)
-
     def assert_reset(self, asserted):
         self.flush()
         if asserted:
@@ -672,20 +677,24 @@ class DAPAccessCMSISDAP(DAPAccessIntf):
         self._protocol.set_swj_clock(self._frequency)
         # configure transfer
         self._protocol.transfer_configure()
-
-    def swj_sequence(self):
+        
+        # configure the selected protocol with defaults.
         if self._dap_port == DAPAccessIntf.PORT.SWD:
-            # configure swd protocol
-            self._protocol.swd_configure()
-            # switch from jtag to swd
-            self._jtag_to_swd()
+            self.configure_swd()
         elif self._dap_port == DAPAccessIntf.PORT.JTAG:
-            # configure jtag protocol
-            self._protocol.jtag_configue(4)
-            # Test logic reset, run test idle
-            self._protocol.swj_sequence([0x1F])
-        else:
-            assert False
+            self.configure_jtag()
+
+    def configure_swd(self, turnaround=1, always_send_data_phase=False):
+        self._protocol.swd_configure(turnaround, always_send_data_phase)
+    
+    def configure_jtag(self, devices_irlen=None):
+        self._protocol.jtag_configure(devices_irlen)
+
+    def swj_sequence(self, length, bits):
+        self._protocol.swj_sequence(length, bits)
+
+    def jtag_sequence(self, cycles, tms, read_tdo, tdi):
+        return self._protocol.jtag_sequence(cycles, length, read_tdo, tdi)
 
     def disconnect(self):
         self.flush()
@@ -980,21 +989,6 @@ class DAPAccessCMSISDAP(DAPAccessIntf):
             self.flush()
 
         return transfer
-
-    def _jtag_to_swd(self):
-        """! @brief Send the command to switch from SWD to jtag
-        """
-        data = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
-        self._protocol.swj_sequence(data)
-
-        data = [0x9e, 0xe7]
-        self._protocol.swj_sequence(data)
-
-        data = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
-        self._protocol.swj_sequence(data)
-
-        data = [0x00]
-        self._protocol.swj_sequence(data)
 
     def _abort_all_transfers(self, exception):
         """! @brief Abort any ongoing transfers and clear all buffers

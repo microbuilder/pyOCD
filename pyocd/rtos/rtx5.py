@@ -209,7 +209,7 @@ class RTXThreadContext(DebugContext):
         return reg_vals
 
 class RTXTargetThread(TargetThread):
-    """! @brief Base class representing a thread on the target."""
+    """! @brief Represents an RTX5 thread on the target."""
 
     STATE_OFFSET = 1
     NAME_OFFSET = 4
@@ -278,7 +278,7 @@ class RTXTargetThread(TargetThread):
 
     @property
     def description(self):
-        return "%s; Priority %d" % (self.STATES[self._state], self.priority)
+        return "%s; Priority %d" % (self.STATES.get(self._state, "(Invalid)"), self.priority)
 
     @property
     def name(self):
@@ -334,8 +334,8 @@ class RTX5ThreadProvider(ThreadProvider):
         self._threads = {}
         self._current = None
         self._current_id = None
-        self._target.session.subscribe(self.event_handler, Target.EVENT_POST_FLASH_PROGRAM)
-        self._target.session.subscribe(self.event_handler, Target.EVENT_POST_RESET)
+        self._target.session.subscribe(self.event_handler, Target.Event.POST_FLASH_PROGRAM)
+        self._target.session.subscribe(self.event_handler, Target.Event.POST_RESET)
         return True
 
     def get_threads(self):

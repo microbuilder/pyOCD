@@ -33,9 +33,10 @@ class GPR(CoreSightComponent):
     @classmethod
     def factory(cls, ap, cmpid, address):
         # Attempt to return the same instance that was created during ROM table scanning.
-        rom_gpr = cmpid.parent_rom_table.gpr
-        if rom_gpr is not None and rom_gpr.address == address:
-            return rom_gpr
+        if cmpid.parent_rom_table is not None:
+            rom_gpr = cmpid.parent_rom_table.gpr
+            if rom_gpr is not None and rom_gpr.address == address:
+                return rom_gpr
         
         # No luck, create a new instance.
         gpr = cls(ap, cmpid, address)
@@ -43,6 +44,7 @@ class GPR(CoreSightComponent):
 
     def __init__(self, ap, cmpid=None, addr=None):
         super(GPR, self).__init__(ap, cmpid, addr)
+        self.domain_count = 0
 
     def init(self):
         """! @brief Inits the GPR."""

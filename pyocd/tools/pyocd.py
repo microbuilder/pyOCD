@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # pyOCD debugger
-# Copyright (c) 2015-2019 Arm Limited
+# Copyright (c) 2015-2020 Arm Limited
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,6 +25,7 @@ from optparse import make_option
 import six
 import prettytable
 import traceback
+import pprint
 
 # Attempt to import readline.
 try:
@@ -41,12 +42,15 @@ from ..probe.pydapaccess import DAPAccess
 from ..probe.debug_probe import DebugProbe
 from ..coresight.ap import MEM_AP
 from ..core.target import Target
-from ..flash.loader import (FlashEraser, FlashLoader, FileProgrammer)
+from ..flash.loader import FlashLoader
+from ..flash.eraser import FlashEraser
+from ..flash.file_programmer import FileProgrammer
 from ..gdbserver.gdbserver import GDBServer
 from ..utility import (mask, conversion)
 from ..utility.cmdline import convert_session_options
 from ..utility.hex import (format_hex_width, dump_hex_data)
 from ..utility.progress import print_progress
+from ..utility.compatibility import get_terminal_size
 
 # Make disasm optional.
 try:
@@ -66,22 +70,22 @@ LEVELS = {
         }
 
 CORE_STATUS_DESC = {
-        Target.TARGET_HALTED : "Halted",
-        Target.TARGET_RUNNING : "Running",
-        Target.TARGET_RESET : "Reset",
-        Target.TARGET_SLEEPING : "Sleeping",
-        Target.TARGET_LOCKUP : "Lockup",
+        Target.State.HALTED : "Halted",
+        Target.State.RUNNING : "Running",
+        Target.State.RESET : "Reset",
+        Target.State.SLEEPING : "Sleeping",
+        Target.State.LOCKUP : "Lockup",
         }
 
 VC_NAMES_MAP = {
-        Target.CATCH_HARD_FAULT : "hard fault",
-        Target.CATCH_BUS_FAULT : "bus fault",
-        Target.CATCH_MEM_FAULT : "memory fault",
-        Target.CATCH_INTERRUPT_ERR : "interrupt error",
-        Target.CATCH_STATE_ERR : "state error",
-        Target.CATCH_CHECK_ERR : "check error",
-        Target.CATCH_COPROCESSOR_ERR : "coprocessor error",
-        Target.CATCH_CORE_RESET : "core reset",
+        Target.VectorCatch.HARD_FAULT : "hard fault",
+        Target.VectorCatch.BUS_FAULT : "bus fault",
+        Target.VectorCatch.MEM_FAULT : "memory fault",
+        Target.VectorCatch.INTERRUPT_ERR : "interrupt error",
+        Target.VectorCatch.STATE_ERR : "state error",
+        Target.VectorCatch.CHECK_ERR : "check error",
+        Target.VectorCatch.COPROCESSOR_ERR : "coprocessor error",
+        Target.VectorCatch.CORE_RESET : "core reset",
         }
 
 HPROT_BIT_DESC = {
@@ -95,12 +99,12 @@ HPROT_BIT_DESC = {
         }
 
 WATCHPOINT_FUNCTION_NAME_MAP = {
-                        Target.WATCHPOINT_READ: 'r',
-                        Target.WATCHPOINT_WRITE: 'w',
-                        Target.WATCHPOINT_READ_WRITE: 'rw',
-                        'r': Target.WATCHPOINT_READ,
-                        'w': Target.WATCHPOINT_WRITE,
-                        'rw': Target.WATCHPOINT_READ_WRITE,
+                        Target.WatchpointType.READ: 'r',
+                        Target.WatchpointType.WRITE: 'w',
+                        Target.WatchpointType.READ_WRITE: 'rw',
+                        'r': Target.WatchpointType.READ,
+                        'w': Target.WatchpointType.WRITE,
+                        'rw': Target.WatchpointType.READ_WRITE,
                         }
 
 ## Default SWD clock in Hz.
@@ -115,8 +119,8 @@ COMMAND_INFO = {
             },
         'erase' : {
             'aliases' : [],
-            'args' : "ADDR [COUNT]",
-            'help' : "Erase internal flash sectors"
+            'args' : "[ADDR] [COUNT]",
+            'help' : "Erase internal flash sectors (performs mass erase if no arguments given)"
             },
         'unlock' :  {
             'aliases' : [],
@@ -124,19 +128,28 @@ COMMAND_INFO = {
             'help' : "Unlock security on the target"
             },
         'status' : {
-            'aliases' : ['stat'],
+            'aliases' : ['stat', 'st'],
             'args' : "",
             'help' : "Show the target's current state"
             },
         'reg' : {
             'aliases' : [],
             'args' : "[-f] [REG]",
-            'help' : "Print all or one register"
+            'help' : "Print core or peripheral register(s).",
+            "extra_help" : "If no arguments are provided, all core registers will be printed. "
+                           "Either a core register name, the name of a peripheral, or a "
+                           "peripheral.register can be provided. When a peripheral name is "
+                           "provided without a register, all registers in the peripheral will "
+                           "be printed. If the -f option is passed, then individual fields of "
+                           "peripheral registers will be printed in addition to the full value."
             },
         'wreg' : {
             'aliases' : [],
-            'args' : "REG VALUE",
-            'help' : "Set the value of a register"
+            'args' : "[-r] REG VALUE",
+            'help' : "Set the value of a core or peripheral register.",
+            "extra_help" : "The REG parameter must be a core register name or a peripheral.register. "
+                           "When a peripheral register is written, if the -r option is passed then "
+                           "it is read back and the updated value printed."
             },
         'reset' : {
             'aliases' : [],
@@ -151,12 +164,19 @@ COMMAND_INFO = {
         'loadmem' : {
             'aliases' : [],
             'args' : "ADDR FILENAME",
-            "help" : "Load a binary file to an address in memory (RAM or flash)"
+            "help" : "Load a binary file to an address in memory (RAM or flash)",
+            "extra_help" : "This command is deprecated in favour of the more flexible 'load'."
             },
         'load' : {
             'aliases' : [],
             'args' : "FILENAME [ADDR]",
             "help" : "Load a binary, hex, or elf file with optional base address"
+            },
+        'compare' : {
+            'aliases' : ['cmp'],
+            'args' : "ADDR [LEN] FILENAME",
+            "help" : "Compare a memory range against a binary file.",
+            "extra_help" : "If the length is not provided, then the length of the file is used."
             },
         'read8' : {
             'aliases' : ['read', 'r', 'rb'],
@@ -195,6 +215,13 @@ COMMAND_INFO = {
             'extra_help' : "The optional SIZE parameter must be one of 8, 16, or 32. If not "
                            "provided, the size is determined by the pattern value's most "
                            "significant set bit."
+            },
+        'find' : {
+            'aliases' : [],
+            'args' : "ADDR LEN BYTE...",
+            'help' : "Search for a value in memory within the given address range.",
+            'extra_help' : "A pattern of any number of bytes can be searched for. Each BYTE "
+                           "parameter must be an 8-bit value." 
             },
         'go' : {
             'aliases' : ['g', 'continue', 'c'],
@@ -384,6 +411,14 @@ INFO_HELP = {
             'aliases' : [],
             'help' : "Display the current HPROT value used by the selected MEM-AP."
             },
+        'graph' : {
+            'aliases' : [],
+            'help' : "Print the target object graph."
+            },
+        'locked' : {
+            'aliases' : [],
+            'help' : "Report whether the target is locked."
+            },
         }
 
 OPTION_HELP = {
@@ -548,12 +583,15 @@ class PyOCDCommander(object):
                 'unlock' :  self.handle_unlock,
                 'status' :  self.handle_status,
                 'stat' :    self.handle_status,
+                'st' :      self.handle_status,
                 'reg' :     self.handle_reg,
                 'wreg' :    self.handle_write_reg,
                 'reset' :   self.handle_reset,
                 'savemem' : self.handle_savemem,
                 'loadmem' : self.handle_loadmem,
                 'load' :    self.handle_load,
+                'compare' : self.handle_compare,
+                'cmp' :     self.handle_compare,
                 'read' :    self.handle_read8,
                 'read8' :   self.handle_read8,
                 'read16' :  self.handle_read16,
@@ -612,6 +650,7 @@ class PyOCDCommander(object):
                 'symbol' :  self.handle_symbol,
                 'gdbserver':self.handle_gdbserver,
                 'fill' :    self.handle_fill,
+                'find' :    self.handle_find,
             }
         self.info_list = {
                 'map' :                 self.handle_show_map,
@@ -629,6 +668,8 @@ class PyOCDCommander(object):
                 'mem-ap' :              self.handle_show_ap,
                 'hnonsec' :             self.handle_show_hnonsec,
                 'hprot' :               self.handle_show_hprot,
+                'graph' :               self.handle_show_graph,
+                'locked' :              self.handle_show_locked,
             }
         self.option_list = {
                 'vector-catch' :        self.handle_set_vectorcatch,
@@ -660,7 +701,7 @@ class PyOCDCommander(object):
                         else:
                             try:
                                 status = CORE_STATUS_DESC[self.target.get_state()]
-                            except KeyError:
+                            except (AttributeError, KeyError):
                                 status = "<no core>"
 
                         # Say what we're connected to.
@@ -779,8 +820,13 @@ class PyOCDCommander(object):
         # Select the first core's MEM-AP by default.
         if not self.args.no_init:
             try:
-                self.selected_ap = self.target.selected_core.ap.ap_num
+                if self.target.selected_core is not None:
+                    self.selected_ap = self.target.selected_core.ap.ap_num
             except IndexError:
+                pass
+            
+            # Fall back to the first MEM-AP.
+            if self.selected_ap is None:
                 for ap_num in sorted(self.target.aps.keys()):
                     if isinstance(self.target.aps[ap_num], MEM_AP):
                         self.selected_ap = ap_num
@@ -811,16 +857,12 @@ class PyOCDCommander(object):
         ConnectHelper.list_connected_probes()
 
     def handle_status(self, args):
-        if self.target.is_locked():
-            print("Security:       Locked")
-        else:
-            print("Security:       Unlocked")
-        if isinstance(self.target, target_kinetis.Kinetis):
-            print("MDM-AP Status:  0x%08x" % self.target.mdm_ap.read_reg(target_kinetis.MDM_STATUS))
         if not self.target.is_locked():
             for i, c in enumerate(self.target.cores):
                 core = self.target.cores[c]
-                print("Core %d status:  %s" % (i, CORE_STATUS_DESC[core.get_state()]))
+                print("Core %d:  %s" % (i, CORE_STATUS_DESC[core.get_state()]))
+        else:
+            print("Target is locked")
 
     def handle_reg(self, args):
         # If there are no args, print all register values.
@@ -850,7 +892,7 @@ class PyOCDCommander(object):
                 if len(subargs) > 1:
                     r = [x for x in p.registers if x.name.lower() == subargs[1]]
                     if len(r):
-                        self._dump_peripheral_register(p, r[0], True)
+                        self._dump_peripheral_register(p, r[0], show_fields)
                     else:
                         raise ToolError("invalid register '%s' for %s" % (subargs[1], p.name))
                 else:
@@ -864,6 +906,13 @@ class PyOCDCommander(object):
             raise ToolError("No register specified")
         if len(args) < 2:
             raise ToolError("No value specified")
+        if len(args) == 3:
+            if args[0] != '-r':
+                raise ToolError("Invalid arguments")
+            del args[0]
+            do_readback = True
+        else:
+            do_readback = False
 
         reg = args[0].lower()
         if reg in coresight.cortex_m.CORE_REGISTER:
@@ -872,6 +921,7 @@ class PyOCDCommander(object):
             else:
                 value = self.convert_value(args[1])
             self.target.write_core_register(reg, value)
+            self.target.flush()
         else:
             value = self.convert_value(args[1])
             subargs = reg.split('.')
@@ -898,7 +948,9 @@ class PyOCDCommander(object):
                             self.target.write_memory(addr, value, r.size)
                     else:
                         raise ToolError("too many dots")
-                    self._dump_peripheral_register(p, r, True)
+                    self.target.flush()
+                    if do_readback:
+                        self._dump_peripheral_register(p, r, True)
                 else:
                     raise ToolError("invalid register '%s' for %s" % (subargs[1], p.name))
             else:
@@ -911,7 +963,7 @@ class PyOCDCommander(object):
             self.target.reset_and_halt()
 
             status = self.target.get_state()
-            if status != Target.TARGET_HALTED:
+            if status != Target.State.HALTED:
                 print("Failed to halt device on reset")
             else:
                 print("Successfully halted device on reset")
@@ -976,7 +1028,10 @@ class PyOCDCommander(object):
         region = self.session.target.memory_map.get_region_for_address(addr)
         flash_init_required =  region is not None and region.is_flash and not region.is_powered_on_boot and region.flash is not None
         if flash_init_required:
-            region.flash.init(region.flash.Operation.VERIFY)
+            try:
+                region.flash.init(region.flash.Operation.VERIFY)
+            except exceptions.FlashFailure:
+                region.flash.init(region.flash.Operation.ERASE)
 
         data = bytearray(self.target.aps[self.selected_ap].read_memory_block8(addr, count))
 
@@ -1014,6 +1069,69 @@ class PyOCDCommander(object):
 
         programmer = FileProgrammer(self.session, progress=print_progress())
         programmer.program(filename, base_address=addr)
+
+    def handle_compare(self, args):
+        if len(args) < 2:
+            print("Error: missing argument")
+            return 1
+        addr = self.convert_value(args[0])
+        if len(args) < 3:
+            filename = args[1]
+            length = None
+        else:
+            filename = args[2]
+            length = self.convert_value(args[1])
+
+        region = self.session.target.memory_map.get_region_for_address(addr)
+        flash_init_required =  region is not None and region.is_flash and not region.is_powered_on_boot and region.flash is not None
+        if flash_init_required:
+            try:
+                region.flash.init(region.flash.Operation.VERIFY)
+            except exceptions.FlashFailure:
+                region.flash.init(region.flash.Operation.ERASE)
+
+        with open(filename, 'rb') as f:
+            file_data = f.read(length)
+        
+        if length is None:
+            length = len(file_data)
+        elif len(file_data) < length:
+            print("File is %d bytes long; reducing comparison length to match." % len(file_data))
+            length = len(file_data)
+        
+        # Divide into 32 kB chunks.
+        CHUNK_SIZE = 32 * 1024
+        chunk_count = (length + CHUNK_SIZE - 1) // CHUNK_SIZE
+        
+        end_addr = addr + length
+        offset = 0
+        mismatch = False
+        
+        for chunk in range(chunk_count):
+            # Get this chunk's size.
+            chunk_size = min(end_addr - addr, CHUNK_SIZE)
+            print("Comparing %d bytes @ 0x%08x" % (chunk_size, addr))
+            
+            data = bytearray(self.target.aps[self.selected_ap].read_memory_block8(addr, chunk_size))
+            
+            for i in range(chunk_size):
+                if data[i] != file_data[offset+i]:
+                    mismatch = True
+                    print("Mismatched byte at 0x%08x (offset 0x%x): 0x%02x (memory) != 0x%02x (file)" %
+                        (addr + i, offset + i, data[i], file_data[offset+i]))
+                    break
+        
+            if mismatch:
+                break
+        
+            offset += chunk_size
+            addr += chunk_size
+        
+        if not mismatch:
+            print("All %d bytes match." % length)
+
+        if flash_init_required:
+            region.flash.cleanup()
     
     # fill [SIZE] ADDR LEN PATTERN
     def handle_fill(self, args):
@@ -1080,6 +1198,44 @@ class PyOCDCommander(object):
             self.target.aps[self.selected_ap].write_memory_block8(addr, data)
             addr += chunk_size
 
+    # find ADDR LEN BYTE...
+    def handle_find(self, args):
+        if len(args) < 3:
+            print("Error: missing argument")
+            return 1
+        addr = self.convert_value(args[0])
+        length = self.convert_value(args[1])
+        pattern = bytearray()
+        for p in args[2:]:
+            pattern += bytearray([self.convert_value(p)])
+        pattern_str = " ".join("%02x" % p for p in pattern)
+        
+        # Divide into 32 kB chunks.
+        CHUNK_SIZE = 32 * 1024
+        chunk_count = (length + CHUNK_SIZE - 1) // CHUNK_SIZE
+        
+        end_addr = addr + length
+        print("Searching 0x%08x-0x%08x for pattern [%s]" % (addr, end_addr - 1, pattern_str))
+        
+        match = False
+        for chunk in range(chunk_count):
+            # Get this chunk's size.
+            chunk_size = min(end_addr - addr, CHUNK_SIZE)
+            print("Read %d bytes @ 0x%08x" % (chunk_size, addr))
+            
+            data = bytearray(self.target.aps[self.selected_ap].read_memory_block8(addr, chunk_size))
+            
+            offset = data.find(pattern)
+            if offset != -1:
+                match = True
+                print("Found pattern at address 0x%08x" % (addr + offset))
+                break
+            
+            addr += chunk_size - len(pattern)
+        
+        if not match:
+            print("Failed to find pattern in range 0x%08x-0x%08x" % (addr, end_addr - 1))
+
     def do_read(self, args, width):
         if len(args) == 0:
             print("Error: no address specified")
@@ -1141,31 +1297,33 @@ class PyOCDCommander(object):
             self.target.flush()
 
     def handle_erase(self, args):
-        if len(args) < 1:
-            raise ToolError("invalid arguments")
-        addr = self.convert_value(args[0])
-        if len(args) < 2:
-            count = 1
+        if len(args) == 0:
+            eraser = FlashEraser(self.session, FlashEraser.Mode.MASS)
+            eraser.erase()
         else:
-            count = self.convert_value(args[1])
-        
-        eraser = FlashEraser(self.session, FlashEraser.Mode.SECTOR)
-        while count:
-            # Look up the flash region so we can get the page size.
-            region = self.session.target.memory_map.get_region_for_address(addr)
-            if not region:
-                print("address 0x%08x is not within a memory region" % addr)
-                break
-            if not region.is_flash:
-                print("address 0x%08x is not in flash" % addr)
-                break
-            
-            # Erase this page.
-            eraser.erase([addr])
-            
-            # Next page.
-            count -= 1
-            addr += region.blocksize
+            addr = self.convert_value(args[0])
+            if len(args) < 2:
+                count = 1
+            else:
+                count = self.convert_value(args[1])
+
+            eraser = FlashEraser(self.session, FlashEraser.Mode.SECTOR)
+            while count:
+                # Look up the flash region so we can get the page size.
+                region = self.session.target.memory_map.get_region_for_address(addr)
+                if not region:
+                    print("address 0x%08x is not within a memory region" % addr)
+                    break
+                if not region.is_flash:
+                    print("address 0x%08x is not in flash" % addr)
+                    break
+
+                # Erase this page.
+                eraser.erase([addr])
+
+                # Next page.
+                count -= 1
+                addr += region.blocksize
 
     def handle_unlock(self, args):
         # Currently the same as erase.
@@ -1175,15 +1333,15 @@ class PyOCDCommander(object):
     def handle_go(self, args):
         self.target.resume()
         status = self.target.get_state()
-        if status == Target.TARGET_RUNNING:
+        if status == Target.State.RUNNING:
             print("Successfully resumed device")
-        elif status == Target.TARGET_SLEEPING:
+        elif status == Target.State.SLEEPING:
             print("Device entered sleep")
-        elif status == Target.TARGET_LOCKUP:
+        elif status == Target.State.LOCKUP:
             print("Device entered lockup")
-        elif status == Target.TARGET_RESET:
+        elif status == Target.State.RESET:
             print("Device is being held in reset")
-        elif status == Target.TARGET_HALTED:
+        elif status == Target.State.HALTED:
             print("Device is halted; a debug event may have occurred")
         else:
             print("Unknown target status: %s" % status)
@@ -1202,7 +1360,7 @@ class PyOCDCommander(object):
         self.target.halt()
 
         status = self.target.get_state()
-        if status != Target.TARGET_HALTED:
+        if status != Target.State.HALTED:
             print("Failed to halt device; target state is %s" % CORE_STATUS_DESC[status])
             return 1
         else:
@@ -1254,13 +1412,13 @@ class PyOCDCommander(object):
             try:
                 wptype = WATCHPOINT_FUNCTION_NAME_MAP[args[1]]
             except KeyError:
-                raise ToolError("unsupported watchpoint type '%s'", args[1])
+                raise ToolError("unsupported watchpoint type '%s'" % args[1])
         else:
-            wptype = Target.WATCHPOINT_READ_WRITE
+            wptype = Target.Watchpoint.READ_WRITE
         if len(args) > 2:
             sz = self.convert_value(args[2])
             if sz not in (1, 2, 4):
-                raise ToolError("unsupported watchpoint size (%d)", sz)
+                raise ToolError("unsupported watchpoint size (%d)" % sz)
         else:
             sz = 4
         if self.target.set_watchpoint(addr, sz, wptype):
@@ -1356,7 +1514,8 @@ class PyOCDCommander(object):
                 if isinstance(result, six.integer_types):
                     print("0x%08x (%d)" % (result, result))
                 else:
-                    print(result)
+                    w, h = get_terminal_size()
+                    pprint.pprint(result, indent=2, width=w, depth=10)
         except Exception as e:
             print("Exception while executing expression:", e)
             if session.Session.get_current().log_tracebacks:
@@ -1388,6 +1547,7 @@ class PyOCDCommander(object):
         addr = self.convert_value(args[0])
         data = self.convert_value(args[1])
         self.target.dp.write_reg(addr, data)
+        self.target.flush()
 
     def handle_readap(self, args):
         if len(args) < 1:
@@ -1415,6 +1575,7 @@ class PyOCDCommander(object):
             data_arg = 2
         data = self.convert_value(args[data_arg])
         self.target.dp.write_ap(addr, data)
+        self.target.flush()
 
     def handle_initdp(self, args):
         self.target.dp.init()
@@ -1513,7 +1674,7 @@ class PyOCDCommander(object):
 
     def handle_show_target(self, args):
         print("Target:       %s" % self.target.part_number)
-        print("DAP IDCODE:   0x%08x" % self.target.dp.dpidr)
+        print("DAP IDCODE:   0x%08x" % self.target.dp.dpidr.idr)
 
     def handle_show_cores(self, args):
         if self.target.is_locked():
@@ -1522,7 +1683,7 @@ class PyOCDCommander(object):
             print("Cores:        %d" % len(self.target.cores))
             for i, c in enumerate(self.target.cores):
                 core = self.target.cores[c]
-                print("Core %d type:  %s" % (i, coresight.cortex_m.CORE_TYPE_NAME[core.core_type]))
+                print("Core %d type:  %s" % (i, coresight.core_ids.CORE_TYPE_NAME[core.core_type]))
 
     def handle_show_map(self, args):
         pt = prettytable.PrettyTable(["Region", "Start", "End", "Size", "Access", "Sector", "Page"])
@@ -1656,6 +1817,15 @@ class PyOCDCommander(object):
                 bitvalue,
                 HPROT_BIT_DESC[bitnum][bitvalue])
         print(desc, end='')
+
+    def handle_show_graph(self, args):
+        self.board.dump()
+    
+    def handle_show_locked(self, args):
+        if self.target.is_locked():
+            print("Taget is locked")
+        else:
+            print("Taget is unlocked")
 
     def handle_set(self, args):
         if len(args) < 1:

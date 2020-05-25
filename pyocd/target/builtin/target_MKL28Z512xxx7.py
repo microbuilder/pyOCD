@@ -132,14 +132,12 @@ class Flash_kl28z(Flash_Kinetis):
         self._saved_firccsr = 0
         self._saved_rccr = 0
 
-    def prepare_target(self, operation, address=None, clock=0, reset=True):
+    def prepare_target(self):
         """!
         This function sets up target clocks to ensure that flash is clocked at the maximum
         of 24MHz. Doing so gets the best flash programming performance. The FIRC clock source
         is used so that there is no dependency on an external crystal frequency.
         """
-        super(Flash_kl28z, self).init(operation, address, clock, reset)
-
         # Enable FIRC.
         value = self.target.read32(SCG_FIRCCSR)
         self._saved_firccsr = value
@@ -191,17 +189,15 @@ class KL28x(Kinetis):
     def create_init_sequence(self):
         seq = super(KL28x, self).create_init_sequence()
 
-        # The KL28 will lock up if an invalid AP is accessed, so replace the AP scan with a
-        # fixed list of known APs.
-        seq.replace_task('find_aps', self.create_kl28_aps)
-
-        # Before creating cores, determine which memory map should be used.
-        seq.insert_before('create_cores',
-            ('detect_dual_core', self.detect_dual_core)
-            )
-
-        seq.insert_after('create_cores',
-            ('disable_rom_remap', self.disable_rom_remap)
+        seq.wrap_task('discovery',
+            lambda seq: seq
+                # The KL28 will lock up if an invalid AP is accessed, so replace the AP scan with a
+                # fixed list of known APs.
+                .replace_task('find_aps', self.create_kl28_aps)
+                # Before creating cores, determine which memory map should be used.
+                .insert_before('create_cores',
+                    ('detect_dual_core', self.detect_dual_core)
+                    )
             )
 
         return seq
@@ -220,7 +216,7 @@ class KL28x(Kinetis):
             LOG.info("KL28 is dual core")
             self.memory_map = self.dualMap
 
-    def disable_rom_remap(self):
+    def post_connect_hook(self):
         # Disable ROM vector table remapping.
         self.aps[0].write32(RCM_MR, RCM_MR_BOOTROM_MASK)
 

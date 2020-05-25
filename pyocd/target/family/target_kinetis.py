@@ -63,12 +63,11 @@ class Kinetis(CoreSightTarget):
     def create_init_sequence(self):
         seq = super(Kinetis, self).create_init_sequence()
         
-        # Must check whether security is enabled, and potentially auto-unlock, before
-        # any init tasks that require system bus access.
-        seq.insert_before('init_ap_roms',
-            ('check_mdm_ap_idr',        self.check_mdm_ap_idr),
-            ('check_flash_security',    self.check_flash_security),
-            )
+        seq.wrap_task('discovery',  lambda seq: \
+                                        seq.insert_before('find_components',
+                                            ('check_mdm_ap_idr',        self.check_mdm_ap_idr),
+                                            ('check_flash_security',    self.check_flash_security),
+                                            ))
         
         return seq
 
@@ -201,7 +200,7 @@ class Kinetis(CoreSightTarget):
             self.mdm_ap.write_reg(MDM_CTRL, 0)
 
             # sanity check that the target is still halted
-            if self.get_state() == Target.TARGET_RUNNING:
+            if self.get_state() == Target.State.RUNNING:
                 raise exceptions.DebugError("Target failed to stay halted during init sequence")
 
     def is_locked(self):

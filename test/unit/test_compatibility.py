@@ -1,5 +1,6 @@
 # pyOCD debugger
-# Copyright (c) 2019 Arm Ltd
+# Copyright (c) 2019-2020 Arm Limited
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,14 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
+import six
+
 from pyocd.utility.compatibility import (
     PY3,
     iter_single_bytes,
     to_bytes_safe,
     to_str_safe,
+    get_terminal_size,
 )
-import pytest
-import six
 
 class TestCompatibility(object):
     def test_iter_single_bytes_bytes(self):
@@ -49,3 +52,10 @@ class TestCompatibility(object):
             assert to_str_safe("string") == "string"
             assert to_str_safe(u"string") == "string"
             assert to_str_safe(u'System Administrator\u2019s Mouse') == 'System Administrator\xe2\x80\x99s Mouse'
+
+    def test_get_terminal_size(self):
+        tsz = get_terminal_size()
+        assert isinstance(tsz, tuple)
+        assert len(tsz) == 2
+        assert isinstance(tsz[0], int)
+        assert isinstance(tsz[1], int)

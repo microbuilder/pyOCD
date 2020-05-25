@@ -31,6 +31,12 @@ OPTIONS_INFO = {
         "Path to custom config file."),
     'connect_mode': OptionInfo('connect_mode', str, "halt",
         "One of 'halt', 'pre-reset', 'under-reset', 'attach'. Default is 'halt'."),
+    'dap_protocol': OptionInfo('dap_protocol', str, 'default',
+        "Wire protocol, either 'swd', 'jtag', or 'default'."),
+    'dap_enable_swj': OptionInfo('dap_swj_enable', bool, True,
+        "Send SWJ transition sequence to switch between SWD and JTAG."),
+    'dap_use_deprecated_swj': OptionInfo('dap_swj_use_deprecated', bool, True,
+        "Use the SWJ sequence deprecated in ADIv5.2 to transition between SWD and JTAG."),
     'debug.log_flm_info': OptionInfo('debug.log_flm_info', bool, False,
         "Log details of loaded .FLM flash algos."),
     'debug.traceback': OptionInfo('debug.traceback', bool, True,
@@ -54,12 +60,18 @@ OPTIONS_INFO = {
     'pack': OptionInfo('pack', (str, list), None,
         "Path or list of paths to CMSIS Device Family Packs. Devices defined in the pack(s) are "
         "added to the list of available targets."),
+    'probe_all_aps': OptionInfo('scan_all_aps', bool, False,
+        "Controls whether all 256 ADIv5 AP addresses will be probed. Default is False."),
     'project_dir': OptionInfo('project_dir', str, None,
         "Path to the session's project directory. Defaults to the working directory when the pyocd "
         "tool was executed."),
     'reset_type': OptionInfo('reset_type', str, 'default',
         "Which type of reset to use by default ('default', 'hw', 'sw', 'sw_sysresetreq', "
         "'sw_vectreset', 'sw_emulated'). The default is 'sw'."),
+    'reset.hold_time': OptionInfo('reset.hold_time', float, 0.1,
+        "Number of seconds to hold hardware reset asserted. Default is 0.1 s (100 ms)."),
+    'reset.post_delay': OptionInfo('reset.post_delay', float, 0.1,
+        "Number of seconds to delay after a reset is issued. Default is 0.1 s (100 ms)."),
     'resume_on_disconnect': OptionInfo('resume_on_disconnect', bool, True,
         "Whether to run target on disconnect."),
     'smart_flash': OptionInfo('smart_flash', bool, True,
@@ -72,6 +84,11 @@ OPTIONS_INFO = {
         "Name of test firmware binary."),
     'user_script': OptionInfo('user_script', str, None,
         "Path of the user script file."),
+    
+    # JLink options
+    'jlink.power': OptionInfo('jlink.power', bool, True,
+        "Enable target power when connecting via a JLink probe, and disable power when "
+        "disconnecting. Default is True."),
 
     # GDBServer options
     'enable_semihosting': OptionInfo('enable_semihosting', bool, False,
@@ -105,4 +122,7 @@ OPTIONS_INFO = {
         "Base TCP port number for the semihosting telnet server."),
     'vector_catch': OptionInfo('vector_catch', str, 'h',
         "Enable vector catch sources."),
+    'xpsr_control_fields': OptionInfo('xpsr_control_fields', bool, False,
+        "When set to True, XPSR and CONTROL registers will have their respective bitfields defined "
+        "for presentation in gdb."),
     }
